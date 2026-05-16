@@ -79,5 +79,6 @@ jobs:
           prerelease: false
           name: ${{ github.ref_name }}
           generate_release_notes: true
+          files: ${{ github.event.repository.name }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
