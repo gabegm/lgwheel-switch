@@ -1,0 +1,29 @@
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.lck
+
+# Node
+node_modules/
+dist/
+
+# Build
+*.pyc
+__pycache__/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# AI assistant
+.claude/
+
+# Logs
+*.log
+
+# Release
+lgwheel-switch.zip
