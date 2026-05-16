@@ -1,0 +1,4 @@
+# LG4FF udev rule
+ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="046d", \
+ATTRS{idProduct}=="c268", ENV{ID_USB_DRIVER}!="lg4ff", \
+RUN+="/usr/sbin/modprobe lg4ff"
