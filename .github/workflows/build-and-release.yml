@@ -1,0 +1,50 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main, master]
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install
+
+      - run: pnpm build
+
+      # Copy plugin.json alongside the build output (required for Decky manual install)
+      - run: cp plugin.json dist/
+
+      # Package as zip
+      - run: |
+          cd dist
+          zip -r ../${{ github.event.repository.name }}.zip .
+          cd ../
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifact
+          path: ${{ github.event.repository.name }}.zip
+        if: always()
+
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ github.event.repository.name }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
