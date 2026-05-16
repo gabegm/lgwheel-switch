@@ -233,67 +233,118 @@ class Plugin:
 
         return result
 
-    async def install_dependencies(self):
-        """Install dependencies (usb_modeswitch, base development tools)."""
-        deps = []
+    async def install_lg4ff(self, wheel_info: dict | None = None):
+        """Full install: deps + build lg4ff + create udev rules."""
+        steps = []
         errors = []
-        
-        try:
-            # Disable read-only mode warning
-            deps.append("⚠️  Step 1: Disabling read-only mode...")
-            process = await asyncio.create_subprocess_exec(
-                "steamos-readonly", "disable",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _stdout, stderr = await process.communicate()
-            if process.returncode != 0:
-                errors.append(f"Failed to disable read-only mode: {stderr.decode().strip()}")
-            else:
-                deps.append("✅ Read-only mode disabled")
-            
-            # Install usb_modeswitch
-            deps.append("📦 Step 2: Installing usb_modeswitch...")
-            process = await asyncio.create_subprocess_exec(
-                "sudo", "pacman", "-S", "--noconfirm", "usb_modeswitch",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
-            if process.returncode != 0:
-                errors.append(f"Failed to install usb_modeswitch: {stderr.decode().strip()}")
-            else:
-                deps.append("✅ usb_modeswitch installed")
-            
-            # Install base dependencies
-            deps.append("📦 Step 3: Installing development dependencies...")
-            packages = ["base-devel", "git", "libusb", "linux-headers"]
-            pkg_list = " ".join(packages)
-            process = await asyncio.create_subprocess_exec(
-                "sudo", "pacman", "-S", "--noconfirm", pkg_list,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
-            if process.returncode != 0:
-                errors.append(f"Failed to install dev tools: {stderr.decode().strip()}")
-            else:
-                deps.append("✅ Development tools installed")
-            
-            # Re-enable read-only
-            deps.append("🔒 Step 4: Re-enabling read-only mode...")
-            process = await asyncio.create_subprocess_exec(
-                "steamos-readonly", "enable",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _stdout, _stderr = await process.communicate()
-            deps.append("✅ Read-only mode re-enabled")
 
-        except Exception as e:
-            errors.append(str(e))
-        
-        return {"deps_installed": deps, "errors": errors}
+        # --- 1. System dependencies ------------------------------------------------
+        try:
+            steps.append("1· Disabling read-only mode …")
+            p = await asyncio.create_subprocess_exec(
+                "steamos-readonly", "disable",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await p.communicate()
+            if p.returncode != 0:
+                errors.append("Failed to disable read-only mode")
+                return {"success": False, "steps": steps, "errors": errors, "requires_reboot": False}
+            steps.append("   ✅ read-only disabled")
+
+            steps.append("2· Installing dependencies …")
+            pkgs = "usb_modeswitch base-devel git libusb linux-headers".split()
+            for pkg in pkgs:
+                p = await asyncio.create_subprocess_exec(
+                    "sudo", "pacman", "-S", "--noconfirm", pkg,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await p.communicate()
+                if p.returncode != 0:
+                    errors.append(f"Failed to install {pkg}")
+            steps.append("   ✅ dependencies installed")
+
+            steps.append("3· Re-enabling read-only mode …")
+            p = await asyncio.create_subprocess_exec(
+                "steamos-readonly", "enable",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await p.communicate()
+            steps.append("   ✅ read-only re-enabled")
+        except Exception as exc:
+            errors.append(str(exc))
+            return {"success": False, "steps": steps, "errors": errors, "requires_reboot": False}
+
+        # --- 2. Build & install lg4ff (lx4ff) ---------------------------------------
+        lg4ff_path = "/opt/lg4ff"
+        try:
+            steps.append("4· Cloning lx4ff repository …")
+            p = await asyncio.create_subprocess_exec(
+                "git", "clone", LG4FF_GIT_URL, lg4ff_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await p.communicate()
+            if p.returncode != 0:
+                errors.append(f"Clone failed: {stderr.decode().strip()}")
+                return {"success": False, "steps": steps, "errors": errors, "requires_reboot": False}
+            steps.append("   ✅ cloned")
+
+            steps.append("5· Building & installing lx4ff …")
+            p = await asyncio.create_subprocess_exec(
+                "sudo", "--", "bash", "-c",
+                f"cd {lg4ff_path} && make clean && make && make install && "
+                f"dkms add . && dkms build lx4ff/1.0 && dkms install lx4ff/1.0",
+            )
+            stdout, stderr = await p.communicate()
+            if p.returncode != 0:
+                errors.append(f"Build failed: {stderr.decode().strip()}")
+                return {"success": False, "steps": steps, "errors": errors, "requires_reboot": True}
+            steps.append("   ✅ lx4ff built & DKMS module installed")
+
+            steps.append("6· Creating udev rules …")
+            rule_path = "/etc/udev/rules.d/99-lg-wheel.rules"
+            
+            # Build the rule content
+            if wheel_info and wheel_info.get("detected"):
+                v = wheel_info.get("vendor", "046d")
+                p_prod = wheel_info.get("product", "c268")  
+                cmd = wheel_info.get("modeswitch_cmd", "30f8090701000000")
+                model_name = wheel_info.get("model", "Logitech Wheel")
+            else:
+                v, p_prod, cmd = "046d", "c268", "30f8090701000000"
+                model_name = "Logitech Wheel"
+
+            rule_content = (
+                f"## Auto USB mode switch for {model_name}\n"
+                f'ACTION=="add", SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{v}", '
+                f'ATTRS{{idProduct}}=="{p_prod}", '
+                f'ENV{{ID_USB_DRIVER}}!="lx4ff", RUN+="/usr/sbin/modprobe lx4ff"\n'
+                f'ACTION=="add", SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{v}", '
+                f'ATTRS{{idProduct}}=="{p_prod}", '
+                f'ENV{{ID_USB_DRIVER}}=="lx4ff", RUN+="/usr/bin/usb_modeswitch -v {v} -p {p_prod} '
+                f'-M {cmd} -m 03 -r 03"\n'
+            )
+            with open(rule_path, "w") as f:
+                f.write(rule_content)
+            steps.append("   ✅ udev rules written")
+
+            steps.append("7· Reloading udev rules …")
+            p = await asyncio.create_subprocess_exec(
+                "sudo", "udevadm", "control", "--reload-rules",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await p.communicate()
+            p = await asyncio.create_subprocess_exec(
+                "sudo", "udevadm", "trigger",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await p.communicate()
+            steps.append("   ✅ udev rules reloaded")
+
+        except Exception as exc:
+            errors.append(str(exc))
+            return {"success": False, "steps": steps, "errors": errors, "requires_reboot": True}
+
+        return {"success": True, "steps": steps, "errors": errors, "requires_reboot": True}
 
     async def build_and_install_lg4ff(self):
         """Clone, build, and install lg4ff with DKMS."""
