@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import shlex
 
 import decky.logger
 
@@ -90,6 +91,12 @@ class Plugin:
         self._closed = True
 
     async def toggle_drivers(self, target_driver: str) -> str:
+        valid_drivers = {DRIVER_LGOGWHEELGAMEPAD, DRIVER_LG4FF}
+        if target_driver not in valid_drivers:
+            raise ValueError(
+                f"Invalid driver '{target_driver}'. Must be one of: {', '.join(sorted(valid_drivers))}"
+            )
+
         current = self._detect_current_driver()
         if current == target_driver:
             decky.logger.info(f"Target driver {target_driver} is already active")
@@ -237,9 +244,20 @@ class Plugin:
         """Full install: deps + build lg4ff + create udev rules."""
         steps = []
         errors = []
+        read_only_disabled = False
 
         # --- 1. System dependencies ------------------------------------------------
         try:
+            # Verify pacman is available
+            p = await asyncio.create_subprocess_exec(
+                "pacman", "--version",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await p.communicate()
+            if p.returncode != 0:
+                errors.append("pacman not found. This plugin requires a Steam Deck or Arch Linux system.")
+                return {"success": False, "steps": steps, "errors": errors, "requires_reboot": False}
+
             steps.append("1· Disabling read-only mode …")
             p = await asyncio.create_subprocess_exec(
                 "steamos-readonly", "disable",
@@ -249,6 +267,7 @@ class Plugin:
             if p.returncode != 0:
                 errors.append("Failed to disable read-only mode")
                 return {"success": False, "steps": steps, "errors": errors, "requires_reboot": False}
+            read_only_disabled = True
             steps.append("   ✅ read-only disabled")
 
             steps.append("2· Installing dependencies …")
@@ -289,28 +308,95 @@ class Plugin:
             steps.append("   ✅ cloned")
 
             steps.append("5· Building & installing lx4ff …")
+
+            # Determine the actual DKMS version by reading Makefile
+            dkms_version = "1.0"
+            makefile_path = os.path.join(lg4ff_path, "Makefile")
+            if os.path.isfile(makefile_path):
+                try:
+                    with open(makefile_path, "r") as f:
+                        for line in f:
+                            match = re.match(r"^\s*PACKAGE_VERSION\s*[:?]?=\s*(.+)", line)
+                            if match:
+                                dkms_version = match.group(1).strip()
+                                break
+                except Exception:
+                    pass
+
+            # Run make clean
             p = await asyncio.create_subprocess_exec(
-                "sudo", "--", "bash", "-c",
-                f"cd {lg4ff_path} && make clean && make && make install && "
-                f"dkms add . && dkms build lx4ff/1.0 && dkms install lx4ff/1.0",
+                "sudo", "make", "-C", lg4ff_path, "clean",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await p.communicate()
+            await p.communicate()
             if p.returncode != 0:
-                errors.append(f"Build failed: {stderr.decode().strip()}")
+                errors.append("make clean failed")
                 return {"success": False, "steps": steps, "errors": errors, "requires_reboot": True}
-            steps.append("   ✅ lx4ff built & DKMS module installed")
+
+            # Run make
+            p = await asyncio.create_subprocess_exec(
+                "sudo", "make", "-C", lg4ff_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await p.communicate()
+            if p.returncode != 0:
+                errors.append("make failed")
+                return {"success": False, "steps": steps, "errors": errors, "requires_reboot": True}
+
+            # Run make install
+            p = await asyncio.create_subprocess_exec(
+                "sudo", "make", "-C", lg4ff_path, "install",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await p.communicate()
+            if p.returncode != 0:
+                errors.append("make install failed")
+                return {"success": False, "steps": steps, "errors": errors, "requires_reboot": True}
+
+            # Register with DKMS
+            p = await asyncio.create_subprocess_exec(
+                "sudo", "dkms", "add", lg4ff_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await p.communicate()
+            if p.returncode != 0:
+                errors.append("dkms add failed")
+                return {"success": False, "steps": steps, "errors": errors, "requires_reboot": True}
+
+            # Build and install DKMS module with discovered version
+            p = await asyncio.create_subprocess_exec(
+                "sudo", "dkms", "build", f"lx4ff/{dkms_version}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await p.communicate()
+            if p.returncode != 0:
+                errors.append(f"dkms build failed (version {dkms_version})")
+                return {"success": False, "steps": steps, "errors": errors, "requires_reboot": True}
+
+            p = await asyncio.create_subprocess_exec(
+                "sudo", "dkms", "install", f"lx4ff/{dkms_version}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await p.communicate()
+            if p.returncode != 0:
+                errors.append(f"dkms install failed (version {dkms_version})")
+                return {"success": False, "steps": steps, "errors": errors, "requires_reboot": True}
+
+            steps.append(f"   ✅ lx4ff built & DKMS module installed (version {dkms_version})")
 
             steps.append("6· Creating udev rules …")
             rule_path = "/etc/udev/rules.d/99-lg-wheel.rules"
-            
+
             # Build the rule content
             if wheel_info and wheel_info.get("detected"):
                 v = wheel_info.get("vendor", "046d")
-                p_prod = wheel_info.get("product", "c268")  
+                p_prod = wheel_info.get("product", "c268")
                 cmd = wheel_info.get("modeswitch_cmd", "30f8090701000000")
+                mode = wheel_info.get("mode", "03")
+                reset = wheel_info.get("reset", "03")
                 model_name = wheel_info.get("model", "Logitech Wheel")
             else:
-                v, p_prod, cmd = "046d", "c268", "30f8090701000000"
+                v, p_prod, cmd, mode, reset = "046d", "c268", "30f8090701000000", "03", "03"
                 model_name = "Logitech Wheel"
 
             rule_content = (
@@ -321,7 +407,7 @@ class Plugin:
                 f'ACTION=="add", SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{v}", '
                 f'ATTRS{{idProduct}}=="{p_prod}", '
                 f'ENV{{ID_USB_DRIVER}}=="lx4ff", RUN+="/usr/bin/usb_modeswitch -v {v} -p {p_prod} '
-                f'-M {cmd} -m 03 -r 03"\n'
+                f'-M {cmd} -m {mode} -r {reset}"\n'
             )
             with open(rule_path, "w") as f:
                 f.write(rule_content)
@@ -343,6 +429,11 @@ class Plugin:
         except Exception as exc:
             errors.append(str(exc))
             return {"success": False, "steps": steps, "errors": errors, "requires_reboot": True}
+
+        # If there were errors and we disabled read-only, warn the user
+        if errors and read_only_disabled:
+            errors.insert(0, "⚠️  WARNING: Read-only mode was disabled but installation failed. "
+                              "Please run 'sudo steamos-readonly enable' manually to restore system protection.")
 
         return {"success": True, "steps": steps, "errors": errors, "requires_reboot": True}
 
@@ -372,26 +463,124 @@ class Plugin:
             
             # Build and install
             result["steps"].append("🔨 Building lg4ff...")
-            chdir_process = await asyncio.create_subprocess_exec(
-                "sudo", "--", "bash", "-c",
-                f"cd {lg4ff_path} && make clean && make && sudo make install && sudo dkms add . && sudo dkms build lx4ff/1.0 && sudo dkms install lx4ff/1.0"
+
+            # Determine the actual DKMS version by reading Makefile
+            dkms_version = "1.0"
+            makefile_path = os.path.join(lg4ff_path, "Makefile")
+            if os.path.isfile(makefile_path):
+                try:
+                    with open(makefile_path, "r") as f:
+                        for line in f:
+                            match = re.match(r"^\s*PACKAGE_VERSION\s*[:?]?=\s*(.+)", line)
+                            if match:
+                                dkms_version = match.group(1).strip()
+                                break
+                except Exception:
+                    pass
+
+            # Run make clean
+            process = await asyncio.create_subprocess_exec(
+                "sudo", "make", "-C", lg4ff_path, "clean",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await chdir_process.communicate()
-            if chdir_process.returncode != 0:
-                result["errors"].append(f"Build failed: {stderr.decode().strip()}")
+            stdout, stderr = await process.communicate()
+            if process.returncode != 0:
+                result["errors"].append(f"make clean failed: {stderr.decode().strip()}")
                 return result
-            result["steps"].append("✅ lg4ff built and DKMS module installed")
+
+            # Run make
+            process = await asyncio.create_subprocess_exec(
+                "sudo", "make", "-C", lg4ff_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode != 0:
+                result["errors"].append(f"make failed: {stderr.decode().strip()}")
+                return result
+
+            # Run make install
+            process = await asyncio.create_subprocess_exec(
+                "sudo", "make", "-C", lg4ff_path, "install",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode != 0:
+                result["errors"].append(f"make install failed: {stderr.decode().strip()}")
+                return result
+
+            # Register with DKMS
+            process = await asyncio.create_subprocess_exec(
+                "sudo", "dkms", "add", lg4ff_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode != 0:
+                result["errors"].append(f"dkms add failed: {stderr.decode().strip()}")
+                return result
+
+            # Build DKMS module with discovered version
+            process = await asyncio.create_subprocess_exec(
+                "sudo", "dkms", "build", f"lx4ff/{dkms_version}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode != 0:
+                result["errors"].append(f"dkms build failed: {stderr.decode().strip()}")
+                return result
+
+            # Install DKMS module
+            process = await asyncio.create_subprocess_exec(
+                "sudo", "dkms", "install", f"lx4ff/{dkms_version}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode != 0:
+                result["errors"].append(f"dkms install failed: {stderr.decode().strip()}")
+                return result
+
+            result["steps"].append(f"✅ lg4ff built and DKMS module installed (version {dkms_version})")
             
-            # Create lg4ff udev rule
+            # Create lg4ff udev rule using detected wheel info
             result["steps"].append("📝 Creating udev rules for lg4ff...")
             udev_path = "/etc/udev/rules.d/99-lx4ff.rules"
-            udev_content = (
-                "# LG4FF udev rules\n"
-                "ACTION==\"add\", SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"046d\", "
-                "ENV{ID_USB_DRIVER}!=\"lx4ff\", RUN+=\"/usr/sbin/modprobe lx4ff\"\n"
-                "ACTION==\"add\", SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"046d\", "
-                "ENV{ID_USB_DRIVER}=\"lx4ff\", RUN+=\"/usr/bin/usb_modeswitch -v 046d -p %k -M 30f8090701010000 -m 03 -r 03\"\n"
-            )
+
+            # Try to find matching wheel model for proper parameters
+            wheel_params = None
+            for key, info in WHEEL_MODELS.items():
+                if key != "default":
+                    # Check if vendor matches any detected wheel
+                    if info["vendor"] == "046d":
+                        wheel_params = info
+                        break
+
+            if wheel_params:
+                udev_content = (
+                    f"# LG4FF udev rules for {wheel_params['model']}\n"
+                    f'ACTION=="add", SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{wheel_params["vendor"]}", '
+                    f'ATTRS{{idProduct}}=="{wheel_params["product"]}", '
+                    f'ENV{{ID_USB_DRIVER}}!="lx4ff", '
+                    f'RUN+="/usr/sbin/modprobe lx4ff"\n'
+                    f'ACTION=="add", SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{wheel_params["vendor"]}", '
+                    f'ATTRS{{idProduct}}=="{wheel_params["product"]}", '
+                    f'ENV{{ID_USB_DRIVER}}="lx4ff", '
+                    f'RUN+="/usr/bin/usb_modeswitch -v {wheel_params["vendor"]} -p {wheel_params["product"]} '
+                    f'-M {wheel_params["modeswitch_cmd"]} -m {wheel_params["mode"]} -r {wheel_params["reset"]}"\n'
+                )
+            else:
+                # Fallback: generic rule for any Logitech device
+                udev_content = (
+                    "# LG4FF udev rules\n"
+                    'ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="046d", '
+                    'ENV{ID_USB_DRIVER}!="lx4ff", '
+                    'RUN+="/usr/sbin/modprobe lx4ff"\n'
+                )
+
             with open(udev_path, "w") as f:
                 f.write(udev_content)
             result["steps"].append("✅ lg4ff udev rules created")
@@ -430,10 +619,11 @@ class Plugin:
         reset = wheel_info["reset"]
         
         rule_content = (
-            f"## Auto USB mode switch for {wheel_info.get('model', 'Logitech wheel')}\n"
-            f'ACTION=="add", SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{vendor}", '
-            f'ATTRS{{idProduct}}=="{product}", RUN+="/usr/bin/usb_modeswitch -v {vendor} -p {product} '
-            f'-M {cmd} -m {mode} -r {reset}"\n'
+            f"## Auto USB mode switch for {shlex.quote(wheel_info.get('model', 'Logitech wheel'))}\n"
+            f'ACTION=="add", SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{shlex.quote(vendor)}", '
+            f'ATTRS{{idProduct}}=="{shlex.quote(product)}", '
+            f'RUN+="/usr/bin/usb_modeswitch -v {shlex.quote(vendor)} -p {shlex.quote(product)} '
+            f'-M {shlex.quote(cmd)} -m {shlex.quote(mode)} -r {shlex.quote(reset)}"\n'
         )
         
         rule_path = "/etc/udev/rules.d/99-lg-wheel.rules"
@@ -481,7 +671,7 @@ class Plugin:
         reset = model_info.get("reset", "03")
         
         instructions = f"""
-=== LG4FF Installation Instructions for {model_info.get('model', 'Logitech wheel')} ===
+=== LG4FF Installation Instructions for {shlex.quote(model_info.get('model', 'Logitech wheel'))} ===
 
 Step 1: Set password and disable read-only mode (requires sudo)
   passwd
@@ -494,7 +684,7 @@ Step 3: Install lg4ff (requires yay or manual build):
   # Option A: Using yay (recommended)
   sudo pacman -S yay
   yay -S new-lg4ff-git
-  
+
   # Option B: Manual build
   sudo pacman -S --noconfirm base-devel git linux-headers libusb
   mkdir -p /opt && cd /opt
@@ -508,10 +698,10 @@ Step 3: Install lg4ff (requires yay or manual build):
 
 Step 4: Create udev rule for automatic USB mode switching
   sudo bash -c "cat > /etc/udev/rules.d/99-lg-wheel.rules << 'EOF'
-## Auto USB mode switch for {model_info.get('model', 'Logitech wheel')}
-ACTION==\"add\", SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{vendor}\", 
-ATTRS{{idProduct}}==\"{product}\", RUN+=\"/usr/bin/usb_modeswitch -v {vendor} -p {product} 
--M {cmd} -m {mode} -r {reset}\"
+## Auto USB mode switch for {shlex.quote(model_info.get('model', 'Logitech wheel'))}
+ACTION==\"add\", SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{shlex.quote(vendor)}\",
+ATTRS{{idProduct}}==\"{shlex.quote(product)}\", RUN+=\"/usr/bin/usb_modeswitch -v {shlex.quote(vendor)} -p {shlex.quote(product)}
+-M {shlex.quote(cmd)} -m {shlex.quote(mode)} -r {shlex.quote(reset)}\"
 EOF"
 
 Step 5: Reload udev rules and reboot
