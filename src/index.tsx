@@ -131,7 +131,7 @@ function LGWheelSwitchPlugin() {
   }, [handleSwitchToDriver]);
 
   const switchToLGOGWheelGamepad = useCallback(() => {
-    handleSwitchToDriver(DRV_LSOG);
+    handleSwitchToDriver(DRV_LGOG);
   }, [handleSwitchToDriver]);
 
   const handleCopyInstructions = useCallback(async () => {
@@ -249,7 +249,7 @@ function LGWheelSwitchPlugin() {
         <PanelSectionRow>
           <Button
             onClick={switchToLGOGWheelGamepad}
-            disabled={activeDriver === DRV_LSOG}
+            disabled={activeDriver === DRV_LGOG}
           >
             Switch to lgogwheelgamepad
           </Button>
