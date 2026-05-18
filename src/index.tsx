@@ -3,6 +3,8 @@ import {
   PanelSection,
   PanelSectionRow,
   Spinner,
+  Collapsible,
+  TextArea,
 } from "@decky/ui";
 import { useState, useEffect, useCallback } from "react";
 import {
@@ -13,7 +15,7 @@ import {
 } from "@decky/api";
 
 const ACTIVE_DRIVER_CHANGED_EVENT = "activeDriverChanged";
-const DRV_LSOG = "lgogwheelgamepad";
+const DRV_LGOG = "lgogwheelgamepad";
 const DRV_LG4FF = "lg4ff";
 
 const toggleDrivers = callable<[string]>("toggle_drivers");
@@ -92,7 +94,7 @@ function LGWheelSwitchPlugin() {
     };
   }, [detectAndSetDriver, detectAndSetWheel, checkLg4ff]);
 
-  const targetDriver = activeDriver === DRV_LSOG ? DRV_LG4FF : DRV_LSOG;
+  const targetDriver = activeDriver === DRV_LGOG ? DRV_LG4FF : DRV_LGOG;
   const isLoading = loading || activeDriver === null;
   const buttonLabel = isLoading
     ? "Detecting driver..."

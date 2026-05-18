@@ -6,6 +6,7 @@ permissions:
 on:
   push:
     branches: ['*']
+    tags: ['v*']
   release:
     types: [published]
 
@@ -72,11 +73,12 @@ jobs:
           cd ../
 
       - name: Create Release
-        if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           prerelease: false
           name: ${{ github.ref_name }}
           generate_release_notes: true
+          files: ${{ github.event.repository.name }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
