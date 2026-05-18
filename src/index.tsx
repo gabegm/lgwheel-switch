@@ -18,23 +18,51 @@ const ACTIVE_DRIVER_CHANGED_EVENT = "activeDriverChanged";
 const DRV_LGOG = "lgogwheelgamepad";
 const DRV_LG4FF = "lg4ff";
 
-const toggleDrivers = callable<[string]>("toggle_drivers");
-const checkLg4ffInstalled = callable<[], any>("check_lg4ff_installed");
-const detectWheel = callable<[], any>("detect_wheel");
-const installLg4ff = callable<[], any>("install_lg4ff");
-const configureUdevRules = callable<[any], any>("configure_udev_rules");
+interface WheelInfo {
+  detected: boolean;
+  model?: string;
+  vendor?: string;
+  product?: string;
+  modeswitch_cmd?: string;
+  mode?: string;
+  reset?: string;
+  error?: string;
+  message?: string;
+}
+
+interface Lg4ffStatus {
+  moduleLoaded: boolean;
+  dkmsEnabled: boolean;
+  udevRulesPresent: boolean;
+}
+
+interface InstallResult {
+  success: boolean;
+  steps: string[];
+  errors: string[];
+  requiresReboot: boolean;
+}
+
+interface UdevResult {
+  success: boolean;
+  errors: string[];
+  step: string;
+}
+
+const toggleDrivers = callable<[string], string>("toggle_drivers");
+const checkLg4ffInstalled = callable<[], Lg4ffStatus>("check_lg4ff_installed");
+const detectWheel = callable<[], WheelInfo>("detect_wheel");
+const installLg4ff = callable<[WheelInfo | undefined], InstallResult>("install_lg4ff");
+const configureUdevRules = callable<[WheelInfo], UdevResult>("configure_udev_rules");
 const getInstallInstructions = callable<[string], string>("get_install_instructions");
-const copyToClipboard = async (text: string) => {
-  await navigator.clipboard.writeText(text);
-};
 
 function LGWheelSwitchPlugin() {
   const [activeDriver, setActiveDriver] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [wheelInfo, setWheelInfo] = useState<any>(null);
-  const [lg4ffStatus, setLg4ffStatus] = useState<any>(null);
-  const [installStatus, setInstallStatus] = useState<any>(null);
+  const [wheelInfo, setWheelInfo] = useState<WheelInfo | null>(null);
+  const [lg4ffStatus, setLg4ffStatus] = useState<Lg4ffStatus | null>(null);
+  const [installStatus, setInstallStatus] = useState<InstallResult | null>(null);
   const [showInstructions, setShowInstructions] = useState(false);
   const [installInstructions, setInstallInstructions] = useState("");
   const [copied, setCopied] = useState(false);
@@ -136,7 +164,7 @@ function LGWheelSwitchPlugin() {
 
   const handleCopyInstructions = useCallback(async () => {
     try {
-      const model = wheelInfo?.model || lg4ffStatus?.model || "Unknown";
+      const model = wheelInfo?.model || "Unknown";
       const instructions = await getInstallInstructions(model);
       setInstallInstructions(instructions);
       setShowInstructions(true);
@@ -145,13 +173,13 @@ function LGWheelSwitchPlugin() {
     } catch (e) {
       console.error("get_install_instructions failed:", e);
     }
-  }, [wheelInfo, lg4ffStatus]);
+  }, [wheelInfo]);
 
   const handleInstallLg4ff = useCallback(async () => {
     setError(null);
     setInstallStatus(null);
     try {
-      const result = await installLg4ff();
+      const result = await installLg4ff(wheelInfo || undefined);
       setInstallStatus(result);
       if (result.success) {
         // Refresh status
@@ -164,7 +192,7 @@ function LGWheelSwitchPlugin() {
       console.error("install_lg4ff failed:", msg);
       setError(msg);
     }
-  }, [checkLg4ff]);
+  }, [wheelInfo, checkLg4ff]);
 
   const handleConfigureUdev = useCallback(async () => {
     if (!wheelInfo || !wheelInfo.detected) {
@@ -187,6 +215,10 @@ function LGWheelSwitchPlugin() {
   }, [wheelInfo, checkLg4ff]);
 
   const lg4ffNotInstalled = !lg4ffStatus?.moduleLoaded && !lg4ffStatus?.dkmsEnabled;
+
+  const handleOpenKonsole = useCallback(() => {
+    alert("To open konsole, press Steam + X on your Steam Deck");
+  }, []);
 
   return {
     name: "LG Wheel Switch",
@@ -284,7 +316,7 @@ function LGWheelSwitchPlugin() {
               <PanelSectionRow>
                 <div style={{ color: installStatus.success ? "green" : "red" }}>
                   {installStatus.success ? "✅ Installation successful!" : "❌ Installation failed"}
-                  {installStatus.require_reboot && (
+                  {installStatus.requiresReboot && (
                     <div style={{ marginTop: "8px" }}>
                       ⚠️ A reboot is now required for the DKMS module to load.
                     </div>
@@ -318,7 +350,7 @@ function LGWheelSwitchPlugin() {
         {/* Open Konsole Button */}
         <PanelSection title="Open Konsole">
           <PanelSectionRow>
-            <Button onClick={() => alert("To open konsole, press Steam + X on your Steam Deck")}>
+            <Button onClick={handleOpenKonsole}>
               Open Konsole
             </Button>
           </PanelSectionRow>

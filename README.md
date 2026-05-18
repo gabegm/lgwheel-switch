@@ -1,5 +1,17 @@
 # LG Wheel Switch
 
+> **⚠️ DANGER — USE AT YOUR OWN RISK**
+>
+> **This plugin is under heavy development and is NOT ready for production use.**
+> It modifies kernel modules, disables system read-only protection, installs DKMS drivers, and modifies udev rules.
+> **Incorrect use can render your Steam Deck unbootable or permanently damage your hardware.**
+>
+> **By using this plugin you agree that:**
+> - The author takes **no responsibility** for any damage, data loss, or hardware issues resulting from its use.
+> - You are solely responsible for backing up your system and understanding what each action does.
+> - You should only use this plugin if you are comfortable recovering a broken Steam Deck from a USB recovery image.
+> - This software is provided "AS IS" without warranty of any kind, express or implied.
+
 A Steam Deck plugin to switch between `lgogwheelgamepad` and `lg4ff` kernel drivers for Logitech racing wheels.
 
 ## Overview
